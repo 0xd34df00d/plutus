@@ -1,13 +1,13 @@
 {-# LANGUAGE ConstraintKinds      #-}
 {-# LANGUAGE DataKinds            #-}
 {-# LANGUAGE DeriveAnyClass       #-}
-{-# LANGUAGE DerivingStrategies   #-}
 {-# LANGUAGE DerivingVia          #-}
 {-# LANGUAGE FlexibleContexts     #-}
 {-# LANGUAGE FlexibleInstances    #-}
 {-# LANGUAGE GADTs                #-}
 {-# LANGUAGE ImpredicativeTypes   #-}
 {-# LANGUAGE LambdaCase           #-}
+{-# LANGUAGE NamedFieldPuns       #-}
 {-# LANGUAGE OverloadedStrings    #-}
 {-# LANGUAGE TemplateHaskell      #-}
 {-# LANGUAGE TypeApplications     #-}
@@ -39,30 +39,39 @@ module Plutus.ChainIndex.DbStore where
 import           Cardano.BM.Trace                         (Trace, logDebug)
 import           Control.Concurrent                       (threadDelay)
 import           Control.Exception                        (try)
+import           Control.Monad                            (guard)
 import           Control.Monad.Freer                      (Eff, LastMember, Member, type (~>))
 import           Control.Monad.Freer.Error                (Error, throwError)
 import           Control.Monad.Freer.TH                   (makeEffect)
 import           Data.ByteString                          (ByteString)
 import           Data.Foldable                            (traverse_)
 import           Data.Kind                                (Constraint)
+import qualified Data.List.NonEmpty                       as L
+import           Data.Maybe                               (isJust, listToMaybe)
 import           Data.Semigroup.Generic                   (GenericSemigroupMonoid (..))
 import qualified Data.Text                                as Text
 import           Data.Word                                (Word64)
 import           Database.Beam                            (Beamable, Columnar, Database, DatabaseEntity,
                                                            DatabaseSettings, FromBackendRow, Generic, Identity,
-                                                           MonadIO (liftIO), SqlDelete, SqlSelect, SqlUpdate,
-                                                           Table (..), TableEntity, dbModification, insertValues,
-                                                           runDelete, runInsert, runSelectReturningList,
-                                                           runSelectReturningOne, runUpdate, withDbModification)
-import           Database.Beam.Backend.SQL                (BeamSqlBackendCanSerialize)
+                                                           MonadIO (liftIO), Q, QBaseScope, QExpr, SqlDelete,
+                                                           SqlOrd ((>.)), SqlSelect, SqlUpdate, SqlValable (val_),
+                                                           Table (..), TableEntity, dbModification, filter_,
+                                                           insertValues, limit_, orderBy_, runDelete, runInsert,
+                                                           runSelectReturningList, runSelectReturningOne, runUpdate,
+                                                           select, withDbModification)
+import           Database.Beam.Backend.SQL                (BeamSqlBackendCanSerialize, HasSqlValueSyntax)
 import           Database.Beam.Backend.SQL.BeamExtensions (BeamHasInsertOnConflict (anyConflict, insertOnConflict, onConflictDoNothing))
 import           Database.Beam.Migrate                    (CheckedDatabaseSettings, defaultMigratableDbSettings,
                                                            renameCheckedEntity, unCheckDatabase)
+import           Database.Beam.Query                      (asc_)
+import           Database.Beam.Query.Internal             (QNested)
 import           Database.Beam.Schema.Tables              (FieldsFulfillConstraint)
 import           Database.Beam.Sqlite                     (Sqlite, SqliteM, runBeamSqliteDebug)
+import           Database.Beam.Sqlite.Syntax              (SqliteValueSyntax)
 import qualified Database.SQLite.Simple                   as Sqlite
 import           Plutus.ChainIndex.ChainIndexError        (ChainIndexError (..))
 import           Plutus.ChainIndex.ChainIndexLog          (ChainIndexLog (..))
+import           Plutus.ChainIndex.Pagination             (Page (..), PageQuery (..), PageSize (..))
 
 data DatumRowT f = DatumRow
     { _datumRowHash  :: Columnar f ByteString
@@ -193,6 +202,8 @@ checkedSqliteDb = defaultMigratableDbSettings
 
 type BeamableSqlite table = (Beamable table, FieldsFulfillConstraint (BeamSqlBackendCanSerialize Sqlite) table)
 
+type BeamThreadingArg = QNested (QNested QBaseScope)
+
 -- | Effect for managing a beam-based database.
 data DbStoreEffect r where
     -- | Insert a row into a table.
@@ -216,6 +227,13 @@ data DbStoreEffect r where
         :: FromBackendRow Sqlite a
         => SqlSelect Sqlite a
         -> DbStoreEffect [a]
+
+    -- | Select using Seek Pagination.
+    SelectPage
+        :: (FromBackendRow Sqlite a, HasSqlValueSyntax SqliteValueSyntax a)
+        => PageQuery a
+        -> Q Sqlite db BeamThreadingArg (QExpr Sqlite BeamThreadingArg a)
+        -> DbStoreEffect (Page a)
 
     SelectOne
         :: FromBackendRow Sqlite a
@@ -249,9 +267,34 @@ handleDbStore trace conn eff = runBeam trace conn $ execute eff
             UpdateRows q -> runUpdate q
             DeleteRows q -> runDelete q
             SelectList q -> runSelectReturningList q
+            SelectPage pageQuery@PageQuery { pageQuerySize = PageSize ps, pageQueryLastItem } q -> do
+              let ps' = fromIntegral ps
+
+              -- Fetch the first @PageSize + 1@ elements after the last query
+              -- element. The @+1@ allows to us to know if there is a next page
+              -- or not.
+              items <- runSelectReturningList
+                        $ select
+                        $ limit_ (ps' + 1)
+                        $ orderBy_ asc_
+                        $ filter_ (\qExpr -> maybe (val_ True)
+                                                  (\lastItem -> qExpr >. val_ lastItem)
+                                                  pageQueryLastItem
+                                  ) q
+
+              let lastItemM = guard (length items > fromIntegral ps)
+                           >> L.nonEmpty items
+                           >>= listToMaybe . L.tail . L.reverse
+              let newPageQuery = fmap (PageQuery (PageSize ps) . Just) lastItemM
+
+              pure $
+                Page
+                    { currentPageQuery = pageQuery
+                    , nextPageQuery = newPageQuery
+                    , pageItems = if isJust lastItemM then init items else items
+                    }
             SelectOne q -> runSelectReturningOne q
             Combined effs -> traverse_ execute effs
-
 
 runBeam ::
     forall effs.
