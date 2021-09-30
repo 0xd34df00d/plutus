@@ -7,32 +7,37 @@
 module Main(main) where
 
 import           Control.Lens
-import           Control.Monad                        (foldM, join, replicateM)
-import           Control.Monad.Freer                  (Eff, Member, runM, sendM)
-import           Control.Monad.Freer.Error            (Error, runError, throwError)
-import           Data.Bifunctor                       (Bifunctor (..))
-import           Data.Either                          (isRight)
-import qualified Data.FingerTree                      as FT
-import           Data.Foldable                        (fold, toList)
-import           Data.List                            (nub, sort)
-import qualified Data.Map                             as Map
-import qualified Data.Set                             as Set
-import qualified Generators                           as Gen
-import           Hedgehog                             (Property, annotateShow, assert, failure, forAll, property, (/==),
-                                                       (===))
-import qualified Hedgehog.Gen                         as Gen
-import qualified Hedgehog.Range                       as Range
-import qualified Plutus.ChainIndex.Emulator.DiskState as DiskState
-import           Plutus.ChainIndex.Tx                 (citxTxId, txOutsWithRef)
-import           Plutus.ChainIndex.TxIdState          (increaseDepth, transactionStatus)
-import qualified Plutus.ChainIndex.TxIdState          as TxIdState
-import           Plutus.ChainIndex.Types              (BlockNumber (..), Depth (..), Tip (..), TxConfirmedState (..),
-                                                       TxIdState (..), TxStatus (..), TxStatusFailure (..),
-                                                       TxValidity (..), tipAsPoint)
-import           Plutus.ChainIndex.UtxoState          (InsertUtxoSuccess (..), RollbackResult (..), TxUtxoBalance (..))
-import qualified Plutus.ChainIndex.UtxoState          as UtxoState
+import           Control.Monad                            (foldM, join, replicateM)
+import           Control.Monad.Freer                      (Eff, Member, runM, sendM)
+import           Control.Monad.Freer.Error                (Error, runError, throwError)
+import           Data.Bifunctor                           (Bifunctor (..))
+import           Data.Either                              (isRight)
+import qualified Data.FingerTree                          as FT
+import           Data.Foldable                            (fold, toList)
+import           Data.List                                (nub, sort)
+import qualified Data.Map                                 as Map
+import qualified Data.Set                                 as Set
+import qualified Generators                               as Gen
+import           Hedgehog                                 (Property, annotateShow, assert, failure, forAll, property,
+                                                           (/==), (===))
+import qualified Hedgehog.Gen                             as Gen
+import qualified Hedgehog.Range                           as Range
+import qualified Plutus.ChainIndex.DbStoreSpec            as DbStoreSpec
+import qualified Plutus.ChainIndex.Emulator.DiskStateSpec as DiskStateSpec
+import qualified Plutus.ChainIndex.Emulator.HandlersSpec  as EmulatorHandlersSpec
+import qualified Plutus.ChainIndex.HandlersSpec           as HandlersSpec
+import qualified Plutus.ChainIndex.PaginationSpec         as PaginationSpec
+import           Plutus.ChainIndex.Tx                     (citxTxId)
+import           Plutus.ChainIndex.TxIdState              (increaseDepth, transactionStatus)
+import qualified Plutus.ChainIndex.TxIdState              as TxIdState
+import           Plutus.ChainIndex.Types                  (BlockNumber (..), Depth (..), Tip (..),
+                                                           TxConfirmedState (..), TxIdState (..), TxStatus (..),
+                                                           TxStatusFailure (..), TxValidity (..), tipAsPoint)
+import           Plutus.ChainIndex.UtxoState              (InsertUtxoSuccess (..), RollbackResult (..),
+                                                           TxUtxoBalance (..))
+import qualified Plutus.ChainIndex.UtxoState              as UtxoState
 import           Test.Tasty
-import           Test.Tasty.Hedgehog                  (testProperty)
+import           Test.Tasty.Hedgehog                      (testProperty)
 
 main :: IO ()
 main = defaultMain tests
@@ -42,6 +47,11 @@ tests =
   testGroup "tests"
     [ testGroup "utxo balance" utxoBalanceTests
     , testGroup "txidstate" txIdStateTests
+    , DiskStateSpec.tests
+    , EmulatorHandlersSpec.tests
+    , HandlersSpec.tests
+    , PaginationSpec.tests
+    , DbStoreSpec.tests
     ]
 
 utxoBalanceTests :: [TestTree]
@@ -53,7 +63,6 @@ utxoBalanceTests =
   , testGroup "generator"
       [ testProperty "match all unspent outputs" matchUnspentOutputs
       , testProperty "generate non-empty blocks" generateNonEmptyBlocks
-      , testProperty "same txOuts between AddressMap and ChainIndexTx" addressMapAndTxShouldShareTxOuts
       ]
   , testGroup "operations"
       [ testProperty "insert new blocks at end" insertAtEnd
@@ -194,17 +203,6 @@ matchUnspentOutputs = property $ do
     -- when we have caught up with the chain, all spent inputs should be matched
     -- (this is more of a test of the generator)
     _tubUnmatchedSpentInputs (fold items) === Set.empty
-
--- | DiskState._AddressMap and ChainIndexTx should share the exact same set of
--- transaction outputs.
-addressMapAndTxShouldShareTxOuts :: Property
-addressMapAndTxShouldShareTxOuts = property $ do
-    chainIndexTx <- forAll $ Gen.evalUtxoGenState Gen.genTx
-    let diskState = DiskState.fromTx chainIndexTx
-        chainIndexTxOutRefs = Set.fromList $ fmap snd $ txOutsWithRef chainIndexTx
-        addressMapTxOutRefs =
-          mconcat $ diskState ^.. DiskState.addressMap . DiskState.unCredentialMap . folded
-    chainIndexTxOutRefs === addressMapTxOutRefs
 
 generateNonEmptyBlocks :: Property
 generateNonEmptyBlocks = property $ do

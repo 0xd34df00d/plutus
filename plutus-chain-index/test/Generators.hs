@@ -20,20 +20,22 @@ module Generators(
     genTx,
     genNonEmptyBlock,
     evalUtxoGenState,
+    runUtxoGenState,
     genTxIdState,
     evalTxIdGenState,
     execTxIdGenState,
     txgsBlocks,
     txgsNumTransactions,
     genTxIdStateTipAndTxId,
-    txIdFromInt
+    txIdFromInt,
+    uxUtxoSet
     ) where
 
 import           Codec.Serialise             (serialise)
 import           Control.Lens                (makeLenses, over, view)
 import           Control.Monad               (replicateM)
 import           Control.Monad.Freer         (Eff, LastMember, Member, runM, sendM, type (~>))
-import           Control.Monad.Freer.State   (State, evalState, execState, gets, modify)
+import           Control.Monad.Freer.State   (State, evalState, execState, gets, modify, runState)
 import qualified Data.ByteString.Lazy        as BSL
 import           Data.Set                    (Set)
 import qualified Data.Set                    as Set
@@ -47,7 +49,7 @@ import           Ledger.Slot                 (Slot (..))
 import           Ledger.Tx                   (Address, TxIn (..), TxOut (..), TxOutRef (..))
 import           Ledger.TxId                 (TxId (..))
 import           Ledger.Value                (Value)
-import           Plutus.ChainIndex.Tx        (ChainIndexTx (..), ChainIndexTxOutputs (..))
+import           Plutus.ChainIndex.Tx        (ChainIndexTx (..), ChainIndexTxOutputs (..), txOutRefs)
 import qualified Plutus.ChainIndex.TxIdState as TxIdState
 import           Plutus.ChainIndex.Types     (BlockId (..), BlockNumber (..), Tip (..), TxIdState)
 import           Plutus.ChainIndex.UtxoState (TxUtxoBalance (..), fromTx)
@@ -94,6 +96,7 @@ data UtxoGenState =
             , _uxNumTransactions :: Int
             , _uxNumBlocks       :: Int
             }
+            deriving Show
 
 makeLenses ''UtxoGenState
 
@@ -180,7 +183,7 @@ genTx = do
 
     deleteInputs (Set.fromList allInputs)
 
-    ChainIndexTx
+    tx <- ChainIndexTx
         <$> nextTxId
         <*> pure (Set.fromList $ fmap (flip TxIn Nothing) allInputs)
         <*> pure (ValidTx $ (\(addr, vl) -> TxOut addr vl Nothing) <$> newOutputs)
@@ -194,6 +197,10 @@ genTx = do
         -- TODO: We need a way to convert the generated 'ChainIndexTx' to a
         -- 'SomeCardanoTx', or vis-versa. And then put it here.
         <*> pure Nothing
+
+    modify (over uxUtxoSet ((<>) (Set.fromList $ txOutRefs tx)))
+
+    pure tx
 
 genTxIdStateTx ::
     forall effs.
@@ -274,3 +281,6 @@ genTxIdStateTipAndTxId = do
 
 evalUtxoGenState :: forall m. Monad m => Eff '[State UtxoGenState, m] ~> m
 evalUtxoGenState = runM . evalState initialState
+
+runUtxoGenState :: forall m a. Monad m => Eff '[State UtxoGenState, m] a -> m (a, UtxoGenState)
+runUtxoGenState = runM . runState initialState
