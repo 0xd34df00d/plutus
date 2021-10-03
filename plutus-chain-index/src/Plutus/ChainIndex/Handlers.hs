@@ -44,6 +44,7 @@ import           Database.Beam.Sqlite              (Sqlite)
 import           Ledger                            (Address (..), ChainIndexTxOut (..), Datum, DatumHash (..),
                                                     MintingPolicyHash (..), RedeemerHash (..), StakeValidatorHash (..),
                                                     TxId (..), TxOut (..), TxOutRef (..), ValidatorHash (..))
+import           Ledger.Value                      (AssetClass (AssetClass), flattenValue)
 import           Plutus.ChainIndex.ChainIndexError (ChainIndexError (..))
 import           Plutus.ChainIndex.ChainIndexLog   (ChainIndexLog (..))
 import           Plutus.ChainIndex.DbStore
@@ -119,6 +120,8 @@ handleQuery = \case
             TipAtGenesis -> throwError QueryFailedNoTip
             tp           -> pure (tp, UtxoState.isUnspentOutput r utxoState)
     UtxoSetAtAddress pageQuery cred -> getUtxoSetAtAddress pageQuery cred
+    UtxoSetWithCurrency pageQuery assetClass ->
+      getUtxoSetWithCurrency pageQuery assetClass
     GetTip -> getTip
 
 getTip :: Member DbStoreEffect effs => Eff effs Tip
@@ -190,6 +193,37 @@ getUtxoSetAtAddress pageQuery cred = do
                     utxo <- all_ (unspentOutputRows db)
                     a <- all_ (addressRows db)
                     guard_ (_addressRowOutRef a ==. _unspentOutputRowOutRef utxo)
+                    pure a
+
+          outRefs <- selectPage (fmap toByteString pageQuery) query
+          let page = fmap fromByteString outRefs
+
+          pure (tp, page)
+
+getUtxoSetWithCurrency
+  :: forall effs.
+    ( Member (State ChainIndexState) effs
+    , Member DbStoreEffect effs
+    , Member (LogMsg ChainIndexLog) effs
+    )
+  => PageQuery TxOutRef
+  -> AssetClass
+  -> Eff effs (Tip, Page TxOutRef)
+getUtxoSetWithCurrency pageQuery assetClass = do
+  utxoState <- gets @ChainIndexState UtxoState.utxoState
+
+  case UtxoState.tip utxoState of
+      TipAtGenesis -> do
+          logWarn TipIsGenesis
+          pure (TipAtGenesis, Page pageQuery Nothing [])
+      tp           -> do
+          let query =
+                fmap _assetClassRowOutRef
+                  $ filter_ (\row -> _assetClassRowAssetClass row ==. val_ (toByteString assetClass))
+                  $ do
+                    utxo <- all_ (unspentOutputRows db)
+                    a <- all_ (assetClassRows db)
+                    guard_ (_assetClassRowOutRef a ==. _unspentOutputRowOutRef utxo)
                     pure a
 
           outRefs <- selectPage (fmap toByteString pageQuery) query
@@ -273,6 +307,7 @@ handleControl = \case
             , DeleteRows $ truncateTable (scriptRows db)
             , DeleteRows $ truncateTable (txRows db)
             , DeleteRows $ truncateTable (addressRows db)
+            , DeleteRows $ truncateTable (assetClassRows db)
             ] ++ getConst (zipTables Proxy (\tbl (InsertRows rows) -> Const [AddRows tbl rows]) db insertRows)
         where
             truncateTable table = delete table (const (val_ True))
@@ -350,9 +385,15 @@ fromTx tx = mempty
         ]
     , txRows = InsertRows [TxRow (PlutusTx.fromBuiltin $ getTxId $ _citxTxId tx) (toByteString tx)]
     , addressRows = fromPairs (fmap credential . txOutsWithRef) AddressRow
+    , assetClassRows = fromPairs (concatMap assetClasses . txOutsWithRef) AssetClassRow
     }
     where
-        credential (TxOut{txOutAddress=Address{addressCredential}}, ref) = (addressCredential, ref)
+        credential :: (TxOut, TxOutRef) -> (Credential, TxOutRef)
+        credential (TxOut{txOutAddress=Address{addressCredential}}, ref) =
+          (addressCredential, ref)
+        assetClasses :: (TxOut, TxOutRef) -> [(AssetClass, TxOutRef)]
+        assetClasses (TxOut{txOutValue}, ref) =
+          fmap (\(c, t, _) -> (AssetClass (c, t), ref)) $ flattenValue txOutValue
         fromMap
           :: (BeamableSqlite t, Serialise k, Serialise v)
           => Lens' ChainIndexTx (Map.Map k v)
@@ -377,12 +418,14 @@ diagnostics = do
     txIds <- selectList . select $ _txRowTxId <$> limit_ 10 (all_ (txRows db))
     numScripts <- selectOne . select $ aggregate_ (const countAll_) (all_ (scriptRows db))
     numAddresses <- selectOne . select $ aggregate_ (const countAll_) $ nub_ $ _addressRowCred <$> all_ (addressRows db)
+    numAssetClasses <- selectOne . select $ aggregate_ (const countAll_) $ nub_ $ _assetClassRowAssetClass <$> all_ (assetClassRows db)
     UtxoState.TxUtxoBalance outputs inputs <- UtxoState._usTxUtxoData . UtxoState.utxoState <$> get @ChainIndexState
 
     pure $ Diagnostics
         { numTransactions    = fromMaybe (-1) numTransactions
         , numScripts         = fromMaybe (-1) numScripts
         , numAddresses       = fromMaybe (-1) numAddresses
+        , numAssetClasses    = fromMaybe (-1) numAssetClasses
         , numUnspentOutputs  = length outputs
         , numUnmatchedInputs = length inputs
         , someTransactions   = fmap (TxId . BuiltinByteString) txIds

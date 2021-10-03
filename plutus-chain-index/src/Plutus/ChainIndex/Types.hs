@@ -181,6 +181,7 @@ data Diagnostics =
         { numTransactions    :: Integer
         , numScripts         :: Integer
         , numAddresses       :: Integer
+        , numAssetClasses    :: Integer
         , numUnspentOutputs  :: Int
         , numUnmatchedInputs :: Int
         , someTransactions   :: [TxId]

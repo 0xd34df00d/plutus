@@ -15,6 +15,7 @@ module Plutus.ChainIndex.Effects(
     , txFromTxId
     , utxoSetMembership
     , utxoSetAtAddress
+    , utxoSetWithCurrency
     , getTip
     -- * Control effect
     , ChainIndexControlEffect(..)
@@ -25,7 +26,7 @@ module Plutus.ChainIndex.Effects(
     ) where
 
 import           Control.Monad.Freer.TH       (makeEffect)
-import           Ledger                       (Datum, DatumHash, MintingPolicy, MintingPolicyHash, Redeemer,
+import           Ledger                       (AssetClass, Datum, DatumHash, MintingPolicy, MintingPolicyHash, Redeemer,
                                                RedeemerHash, StakeValidator, StakeValidatorHash, TxId, Validator,
                                                ValidatorHash)
 import           Ledger.Credential            (Credential)
@@ -62,6 +63,8 @@ data ChainIndexQueryEffect r where
 
     -- | Unspent outputs located at addresses with the given credential.
     UtxoSetAtAddress :: PageQuery TxOutRef -> Credential -> ChainIndexQueryEffect (Tip, Page TxOutRef)
+
+    UtxoSetWithCurrency :: PageQuery TxOutRef -> AssetClass -> ChainIndexQueryEffect (Tip, Page TxOutRef)
 
     -- | Get the tip of the chain index
     GetTip :: ChainIndexQueryEffect Tip

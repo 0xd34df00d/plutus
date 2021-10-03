@@ -1,11 +1,17 @@
-{-# LANGUAGE DataKinds      #-}
-{-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE TypeOperators  #-}
-module Plutus.ChainIndex.Api(API, FromHashAPI, UtxoAtAddressRequest(..)) where
+{-# LANGUAGE DataKinds             #-}
+{-# LANGUAGE DeriveAnyClass        #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE TypeOperators         #-}
+module Plutus.ChainIndex.Api
+  ( API
+  , FromHashAPI
+  , UtxoAtAddressRequest(..)
+  , UtxoWithCurrencyRequest(..)
+  ) where
 
 import           Data.Aeson                   (FromJSON, ToJSON)
 import           GHC.Generics                 (Generic)
-import           Ledger                       (Datum, DatumHash, MintingPolicy, MintingPolicyHash, Redeemer,
+import           Ledger                       (AssetClass, Datum, DatumHash, MintingPolicy, MintingPolicyHash, Redeemer,
                                                RedeemerHash, StakeValidator, StakeValidatorHash, TxId, Validator,
                                                ValidatorHash)
 import           Ledger.Credential            (Credential)
@@ -19,7 +25,7 @@ import           Servant.API                  (Get, JSON, NoContent, Post, Put, 
 -- the number of elements per page, and optionnally, the last item of the last
 -- requested page.
 --
--- Here's an example for requesting the first page.
+-- Here's an example for requesting the first page:
 --
 -- {
 --   "pageQuery": {
@@ -62,6 +68,30 @@ data UtxoAtAddressRequest = UtxoAtAddressRequest
     }
     deriving (Show, Eq, Generic, FromJSON, ToJSON)
 
+-- | See the comment on 'UtxoAtAddressRequest'.
+--
+-- The difference is using @currency@ field instead of @credential@.
+-- {
+--   "pageQuery": {
+--     ...
+--   },
+--   "currency": {
+--     "unAssetClass": [
+--       {
+--         "unCurrencySymbol": ""
+--       },
+--       {
+--         "unTokenName": ""
+--       }
+--     ]
+--   }
+-- }
+data UtxoWithCurrencyRequest = UtxoWithCurrencyRequest
+    { pageQuery :: PageQuery TxOutRef
+    , currency  :: AssetClass
+    }
+    deriving (Show, Eq, Generic, FromJSON, ToJSON)
+
 type API
     = "healthcheck" :> Get '[JSON] NoContent
     :<|> "from-hash" :> FromHashAPI
@@ -69,6 +99,7 @@ type API
     :<|> "tx" :> ReqBody '[JSON] TxId :> Post '[JSON] ChainIndexTx
     :<|> "is-utxo" :> ReqBody '[JSON] TxOutRef :> Post '[JSON] (Tip, Bool)
     :<|> "utxo-at-address" :> ReqBody '[JSON] UtxoAtAddressRequest :> Post '[JSON] (Tip, Page TxOutRef)
+    :<|> "utxo-with-currency" :> ReqBody '[JSON] UtxoWithCurrencyRequest :> Post '[JSON] (Tip, Page TxOutRef)
     :<|> "tip" :> Get '[JSON] Tip
     :<|> "collect-garbage" :> Put '[JSON] NoContent
     :<|> "diagnostics" :> Get '[JSON] Diagnostics
