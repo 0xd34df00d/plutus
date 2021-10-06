@@ -1,9 +1,9 @@
 {-# LANGUAGE FlexibleInstances    #-}
 {-# LANGUAGE LambdaCase           #-}
 {-# LANGUAGE OverloadedStrings    #-}
+{-# LANGUAGE TemplateHaskell      #-}
 {-# LANGUAGE TypeApplications     #-}
 {-# LANGUAGE TypeSynonymInstances #-}
-
 module CostModelInterface.Spec (test_costModelInterface) where
 
 import           PlutusCore
@@ -12,8 +12,15 @@ import           PlutusCore.Evaluation.Machine.CostModelInterface
 import           PlutusCore.Evaluation.Machine.ExBudget
 import           PlutusCore.Evaluation.Machine.MachineParameters
 
+import           Data.Aeson
+import qualified Data.ByteString.Lazy                             as BSL
 import qualified Data.Map                                         as Map
+import           Data.Maybe
 import qualified Data.Text                                        as Text
+import           Instances.TH.Lift                                ()
+import qualified Language.Haskell.TH.Syntax                       as TH
+import           System.FilePath
+import           TH.RelativePaths
 import           Test.Tasty
 import           Test.Tasty.HUnit
 
@@ -83,8 +90,8 @@ testSelfUpdateWithExtraEntry model =
     do
       params <- extractParams model
       let params' = Map.insert "XYZ" 123 params
-      model' <- applyParams model params'
-      model' @?= model
+          mModel = applyCostModelParams model params'
+      assertBool "Superfluous costparam was not caught." $ isNothing mModel
 
 -- Update a model with its own params with an entry deleted: this should
 -- be OK because the original member of the model will still be there.
@@ -154,4 +161,32 @@ test_costModelInterface =
              , testCase "randomCekCostModel  <- defaultCekCostModel" $ testExtractAfterUpdate randomCekCostModel  defaultCekCostModel
              , testCase "defaultCekCostModel <- randomCekCostModel"  $ testExtractAfterUpdate defaultCekCostModel randomCekCostModel
              ]
+       , testGroup "default ledger params"
+             [ testCase "default ledger params deserialize" testDeserialize
+             , testCase "default ledger params can be applied to default cost model" testApply
+             , testCase "mispelled param in ledger params " testMispelled
+             ]
      ]
+
+
+ledgerParamsBS :: BSL.ByteString
+ledgerParamsBS = $(TH.lift =<< qReadFileString ("plutus-core" </> "test" </> "CostModelInterface" </> "defaultCostModelParams.json"))
+
+testDeserialize :: IO ()
+testDeserialize = assertBool "Failed to decode default ledger cost params" $ isJust $
+    decode @CostModelParams ledgerParamsBS
+
+testApply :: IO ()
+testApply =  assertBool "Failed to load the ledger cost params into the our cost model" . isJust $ do
+        c <- decode @CostModelParams ledgerParamsBS
+        applyCostModelParams defaultCekCostModel c
+
+testMispelled :: IO ()
+testMispelled =   assertBool "Failed to catch mispelled cost param" . isNothing $ do
+    c <- decode @CostModelParams ledgerParamsBS
+    let (Just cekVarCostValue, c') = deleteLookup cekVarCostCpuKey c
+        c'' = Map.insert cekVarCostCpuKeyMispelled cekVarCostValue  c'
+    applyCostModelParams defaultCekCostModel c''
+  where
+      cekVarCostCpuKeyMispelled = "cekVarCost--exBudgetCPU"
+      deleteLookup = Map.updateLookupWithKey (const $ const Nothing)

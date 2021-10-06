@@ -17,6 +17,7 @@ import           Data.Aeson
 import           Data.Aeson.Flatten
 import qualified Data.HashMap.Strict                                      as HM
 import qualified Data.Map                                                 as Map
+import qualified Data.Map.Merge.Lazy                                      as Map
 import qualified Data.Text                                                as Text
 
 
@@ -48,7 +49,7 @@ programs whose cost reaches MaxBound will fail due to excesssive resource usage.
 
 3. BuiltinCostModel includes the *type* of the model, which isn't a parameter
 
-We can just strip the out, but in particular this means that the parameters are
+We can just strip the type out, but in particular this means that the parameters are
 not enough to *construct* a model.  So we punt and say that you can *update* a
 model by giving the parameters. So you can take the default model and then
 overwrite the parameters, which seems okay.
@@ -93,16 +94,23 @@ applyParams :: (FromJSON a, ToJSON a) => a -> CostModelParams -> Maybe a
 applyParams cm params = case toJSON cm of
     Object o ->
         let
-            hashmapified = HM.fromList $ Map.toList params
-            usingScientific = fmap (Number . fromIntegral) hashmapified
-            flattened = flattenObject "-" o
+            usingScientific = fmap (Number . fromIntegral) params
+            flattened = fromHash $ flattenObject "-" o
             -- this is where the overwriting happens, this is left-biased
-            merged = HM.union usingScientific flattened
-            unflattened = unflattenObject "-" merged
-        in case fromJSON (Object unflattened) of
-            Success a -> Just a
-            Error _   -> Nothing
+        in do
+            merged <- Map.mergeA failMissing Map.preserveMissing (Map.zipWithMatched leftBiased) usingScientific flattened
+            let unflattened = unflattenObject "-" $ toHash merged
+            case fromJSON (Object unflattened) of
+                Success a -> Just a
+                Error _   -> Nothing
     _ -> Nothing
+  where
+    toHash = HM.fromList . Map.toList
+    fromHash = Map.fromList . HM.toList
+    -- left-biased merging when key found in both maps
+    failMissing = Map.traverseMissing $ \ _k _x -> fail "A Maybe Monadfail"
+    leftBiased _k l _r = l
+
 
 -- | Parameters for a machine step model and a builtin evaluation model bundled together.
 data SplitCostModelParams =
